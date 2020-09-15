@@ -1,0 +1,473 @@
+---
+title: "Forecast evaluation"
+author: "Peder Bacher"
+date: "`r Sys.Date()`"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Forecast evaluation}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r external-code, cache=FALSE, include=FALSE, purl = FALSE}
+# Have to load the knitr to use hooks
+library(knitr)
+# This vignettes name
+vignettename <- "forecast-evaluation"
+# REMEMBER: IF CHANGING IN THE shared-init (next block), then copy to the others!
+```
+<!--shared-init-start-->
+```{r init, cache=FALSE, include=FALSE, purl=FALSE}
+# Width will scale all
+figwidth <- 12
+# Scale the wide figures (100% out.width)
+figheight <- 4
+# Heights for stacked time series plots
+figheight1 <- 5
+figheight2 <- 6.5
+figheight3 <- 8
+figheight4 <- 9.5
+figheight5 <- 11
+# Set the size of squared figures (same height as full: figheight/figwidth)
+owsval <- 0.35
+ows <- paste0(owsval*100,"%")
+ows2 <- paste0(2*owsval*100,"%")
+# 
+fhs <- figwidth * owsval
+
+# Set for square fig: fig.width=fhs, fig.height=fhs, out.width=ows}
+# If two squared the:  fig.width=2*fhs, fig.height=fhs, out.width=ows2
+
+# Check this: https://bookdown.org/yihui/rmarkdown-cookbook/chunk-styling.html
+# Set the knitr options
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "##    ",
+  prompt = FALSE,
+  cache = TRUE,
+  cache.path = paste0("../tmp/vignettes/tmp-",vignettename,"/"),
+  fig.align="center",
+  fig.path = paste0("../tmp/vignettes/tmp-",vignettename,"/"),
+  fig.height = figheight,
+  fig.width = figwidth,
+  out.width = "100%"
+)
+options(digits=3)
+
+hook_output <- knit_hooks$get("output")
+knit_hooks$set(output = function(x, options) {
+  lines <- options$output.lines
+  if (is.null(lines)) {
+    return(hook_output(x, options))  # pass to default hook
+  }
+  x <- unlist(strsplit(x, "\n"))
+  more <- "## ...output cropped"
+  if (length(lines)==1) {        # first n lines
+    if (length(x) > lines) {
+      # truncate the output, but add ....
+      x <- c(head(x, lines), more)
+    }
+  } else {
+    x <- c(more, x[lines], more)
+  }
+  # paste these lines together
+  x <- paste(c(x, ""), collapse = "\n")
+  hook_output(x, options)
+})
+
+```
+
+[onlineforecasting]: https://onlineforecasting.org/articles/onlineforecasting.pdf
+[building heat load forecasting]: https://onlineforecasting.org/examples/building-heat-load-forecasting.html
+[onlineforecasting.org]: https://onlineforecasting.org
+<!--shared-init-end-->
+
+
+
+## Intro
+This vignette provides a short overview of the basics of forecast evaluation
+with the functions from the onlineforecast package. It follows up on the
+vignettes [setup-data](setup-data.html) and [setup-and-use-model](setup-and-use-model.html), and continues the building load forecast
+modelling presented there. If something is introduced in the present text, but
+not explained, then have a look in the two preceding vignettes to find an explanation.
+
+## Load forecasts
+
+First Load the package, setup the model and calculate the forecasts:
+```{r, echo=1:2, purl=1:2}
+# Load the package
+library(onlineforecast)
+#library(devtools)
+#load_all(as.package("../../onlineforecast"))
+```
+
+Just start by:
+```{r}
+# Keep the data in D to simplify notation
+D <- Dbuilding
+# Keep the model output in y (just easier code later)
+D$y <- D$heatload
+# 
+D$tday <- make_tday(D$t, 0:36)
+```
+
+
+
+## Score period
+
+### Score period
+Set the `scoreperiod` as a logical vector to control which points will be
+included in score calculations.
+
+Use it to exclude a burn-in period of one week:
+```{r}
+# Set the score period
+D$scoreperiod <- in_range("2010-12-22", D$t)
+```
+
+
+### Train period
+
+One fundamental caveat in data-driven modelling is over-fitting a model. This
+can easily happen when the model is fitted (trained) and evaluated on the same
+data. There are essentially two ways of dealing with this: Penalize increased
+model complexity or divide into a training set and test set (cross-validation). 
+
+In most forecasting applications the easiest and most transparent approach
+is some cross-validation approach - many methods for dividing into sets have
+been suggested. For online forecasting it is luckily quite straight forward,
+when a model is fitted using a recursive estimation method, like the RLS. In
+each time step the following happens:
+
+- Data for the new time point becomes available, both observations and new
+  forecasts.
+  
+- The parameters in the model are updated.
+
+- A new forecast is calculated.
+
+Hence, those forecasts are only calculated based on past data, so there is
+no need for dividing into a training set and a test set!
+
+However, the parameters (like the forgetting factor and low-pass filter
+coefficients) are optimized on a particular period, hence over-fitting is
+possible, however it's most often very few parameters compared to the number of
+observations - so the it's very unlikely to over-fit a recursive fitted model in
+this setup.
+
+
+
+## Models
+
+
+```{r, output.lines=10}
+# Define a new model with low-pass filtering of the Ta input
+model <- forecastmodel$new()
+model$output = "y"
+model$add_inputs(Ta = "lp(Ta, a1=0.9)",
+                 I = "lp(I, a1=0.9)",
+                 mu = "one()")
+model$add_prmbounds(Ta__a1 = c(0.8, 0.9, 0.99),
+             I__a1 = c(0.6, 0.9, 0.99),
+             lambda = c(0.9, 0.99, 0.9999))
+model$add_regprm("rls_prm(lambda=0.9)")
+model$kseq <- c(3,18)
+# Optimize the parameters
+model$prm <- rls_optim(model, D)$par
+```
+
+Fit for all horizons and see the fit summary:
+```{r}
+# Fit for all horizons
+model$kseq <- 1:36
+# Fit with RLS
+fit1 <- rls_fit(model$prm, model, D)
+# Check the fit
+summary(fit1)
+```
+
+Let us extend the model by adding a new input: A diurnal pattern comprised by
+Fourier series. It can simply be added to the current model object:
+```{r, output.lines=10}
+# Add a diurnal curve using fourier series
+model$add_inputs(mu_tday = "fs(tday/24, nharmonics=4)")
+model$kseq <- c(3,18)
+# Optimize the parameters
+model$prm <- rls_optim(model, D)$par
+```
+
+Fit for all horizons and see the fit summary:
+```{r}
+# Fit for all horizons
+model$kseq <- 1:36
+# Fit with RLS
+fit2 <- rls_fit(model$prm, model, D)
+# Check the fit
+summary(fit2)
+```
+
+
+
+Keep the forecasts for plotting and later analysis:
+```{r}
+# Keep the forecasts from each model
+D$Yhat1 <- fit1$Yhat
+D$Yhat2 <- fit2$Yhat
+```
+
+Plot the full score period:
+```{r, fig.height=figheight2}
+# Plot to see the forecasts for the shortest and the longest horizon
+plot_ts(subset(D,D$scoreperiod), c("^y|^Yhat1","^y|^Yhat2"), kseq = c(1,36))
+```
+
+Plot the full the first 14 days of the score period:
+```{r, fig.height=figheight2}
+# Plot to see the forecasts for the shortest and the longest horizon
+plot_ts(subset(D,which(D$scoreperiod)[1:(14*24)]), c("^y|^Yhat1","^y|^Yhat2"), kseq = c(1,36))
+```
+We can see how adding the diurnal pattern enables to track the morning shower peaks.
+
+
+
+## Reference models
+
+The performance of a forecast model should be compared to a reference
+model. This is however not at all trivial, since the suitable reference model
+depends on the particular case of forecasting, e.g. the suitable reference model
+for wind power forecasting is not the same as for solar power forecasting -
+even within the same application the suitable reference model can be different
+depending on particular conditions etc.
+
+In general the fundamental reference model should be the simplest reasonable
+model not relying on any inputs, hence either a model based on a mean
+calculation or some persistence should used. It can also be, that the study is
+about concluding the value of using NWPs as input, and in that case the
+reference model should be the best model without the NWPs.
+
+We will here demonstrate how to generate persistence forecasts, both a
+persistence with the current model output and a diurnal persistence, which uses
+the latest value lagged a given period from the forecast time point.
+
+First the simple persistence:
+```{r}
+# Just keep the horizons
+kseq <- 1:36
+# The simple persistence
+D$YhatP <- persistence(D$y, kseq)
+# Plot a few horizons
+plot_ts(D, c("^y$|YhatP$"), c("2011-01-05","2011-01-10"), kseq=c(1,24,36))
+```
+Remember that the forecasts are lagged in the plot. Maybe it's even more obvious
+to see that it's simply the current value for all horizons:
+```{r}
+D$YhatP[1:4, 1:8]
+```
+
+A diurnal (i.e. 24 hours) persistence is: Take the value from the most recent
+time point, at the same time of day, as the forecast time point
+(i.e. `tod(t+k)`). It can be obtained by:
+```{r}
+# Use the argument perlen to set the period length
+D$YhatDP <- persistence(D$y, kseq, perlen=24)
+# Plot a few horizons
+plot_ts(D, c("^y$|YhatDP$"), c("2011-01-05","2011-01-10"), kseq=c(1,24,36))
+```
+Note how going beyond the `perlen` value, then the forecasts are the 48 hours
+lag values (going >48 the forecasts will be 72 lagged and so fourth).
+
+
+## Score comparison
+
+Now it's just a matter of calculating the score, as a function of the horizon,
+for each model and compare them.
+
+We have kept the forecasts in the same format for each model, we can find them by:
+```{r}
+# Find the forecasts in D
+nms <- grep("^Yhat", names(D), value=TRUE)
+nms
+```
+So it's the small model, large model, and simple and diurnal persistence, respectively.
+
+One quite important point: When comparing forecasts from different models
+exactly the same forecast points must be included. When NAs are present, not all
+models predict the same values, e.g. a persistence model will leave forecasts
+after NAs, also as NAs.
+
+So to make sure that exactly the same points are included in the score
+calculation, we must only forecast points where all forecasts are available
+(i.e. non-NA):
+```{r}
+# The non-NA for the first forecast
+ok <- !is.na(D[[nms[1]]])
+# Go through the remaining: all must be non-NA for a point
+for(nm in nms[-1]){
+    ok <- ok & !is.na(D[[nm]])
+}
+ok <- as.data.frame(ok)
+names(ok) <- pst("k",kseq)
+# Lag to match resiuduals in time
+ok <- lagdf(ok, "+k")
+# Only the score period
+ok <- ok & D$scoreperiod
+# Finally, the vector with TRUE for all points with no NAs for any forecast
+ok <- apply(ok, 1, all)
+```
+
+How many points are left?
+```{r}
+sum(ok)
+length(ok)
+```
+
+Now the residuals can be calculated and the score:
+```{r}
+# Use the residuals function
+R <- residuals(D$Yhat1, D$y)
+# And the score as a function of the horizon
+score(R, scoreperiod=ok)$scoreval
+```
+
+
+Calculated the score (default is RMSE) for all models:
+```{r}
+RMSE <- sapply(nms, function(nm){
+    score(residuals(D[[nm]],D$y), ok)$scoreval
+})
+```
+    
+```{r, include=FALSE}
+# sapply(kseq, function(k){
+#     rmse(y - lagdf(YhatDM[ ,pst("k",k)], k))
+#     # hej det er vilfred jeg er peders søn og jeg elsker min far go jeg god til matematik og jeg elsker også min mor 
+# })
+```
+
+Plot the RMSE as a function of the horizon:
+```{r, fig.height=figheight2}
+RMSE <- as.data.frame(RMSE)
+names(RMSE) <- nms
+
+plot(0, type="n", xlim=range(kseq), ylim=range(RMSE), xlab="Horizon k", ylab="RMSE (kW)")
+for(i in 1:length(RMSE)){
+    points(kseq, RMSE[ ,i], type="b", col=i)
+}
+```
+
+
+
+
+### Training set and test set
+
+As explained, it is most times not necessary to divide in a train and a test
+set, when fitting recursively, however it can be useful sometimes. 
+
+An easy approach is to set a logical vector, which is TRUE until the end of the
+training period:
+```{r plottrain}
+D$trainperiod <- in_range(D$t[1]-1, D$t, "2011-02-01")
+plot(D$t, D$trainperiod)
+```
+then optimize the parameters only on this period, by taking a subset:
+```{r, output.lines=10}
+model$kseq <- c(3,18)
+# Optimize the parameters
+model$prm <- rls_optim(model, subset(D,D$trainperiod))$par
+```
+
+and then fit on the entire set:
+```{r}
+# Fit for all horizons
+model$kseq <- 1:36
+# Fit with RLS
+fittmp <- rls_fit(model$prm, model, D)
+```
+
+Finally, the score can be calculated on the period following the train period by:
+```{r scorefit}
+score_fit(fittmp, !D$trainperiod)$scoreval
+```
+
+In this way it's rather easy to set up different schemes, like optimizing the
+parameters once a week etc.
+
+
+
+## Residual analysis and model validation
+
+In the process of developing good forecasting models it is the always an
+interesting and informative experience (and necessary) to investigate the
+results of a model. Most of the time it boils down to investigating if there are
+any significant patterns left in the residuals - and how, if any, they can be
+described by extending the model.
+
+Plot for the small model:
+```{r plot1, fig.height=figheight5}
+kseq <- c(1,18,36)
+plot_ts(fit1, kseq=kseq)
+```
+In the second plot we see the residuals and it's clear that there is a diurnal
+pattern - and in the lower three plots the coefficients has also a diurnal pattern.
+
+Plot for the larger model (plots not included here):
+```{r, fig.height=figheight5, fig.keep="none"}
+plot_ts(fit2, kseq=kseq)
+```
+
+A shorter period (plots not included here):
+```{r, fig.height=figheight5, fig.keep="none"}
+xlim <- c("2011-01-01","2011-01-14")
+plot_ts(fit1, xlim=xlim, kseq=kseq)
+plot_ts(fit2, xlim=xlim, kseq=kseq)
+```
+
+The data plotted is returned:
+```{r tscoef}
+tmp <- plot_ts(fit2, kseq=kseq, plotit=FALSE)
+class(tmp)
+names(tmp)
+# Residuals
+plot_ts(tmp, c("^Residuals"), kseq=kseq)
+# All RLS coefficients
+nms <- names(fit2$Lfitval$k1)
+plot_ts(tmp, pattern=nms, kseq=kseq)
+```
+
+```{r, fig.height=figheight3}
+plot_ts(tmp, pattern=c("^y$|^Yhat",nms), c("2011-02-06","2011-02-10"), kseq=kseq)
+```
+
+The RLS coefficients are in the fit for each horizon:
+```{r rlscoefficients}
+str(fit1$Lfitval$k1)
+```
+
+A pairs plot with residuals and inputs to see if patterns are left:
+```{r plotpairs, fig.height=figwidth}
+kseq <- c(1,36)
+D$Residuals <- residuals(fit2)[ ,pst("h",kseq)]
+D$hour <- aslt(D$t)$hour
+pairs(D, subset=D$scoreperiod, pattern="Residuals|Ta|I|hour|^t$", kseq=kseq)
+```
+So inspecting the two upper rows, there are no clear patterns to be seen for the
+mean (red lines are not deviating from zero). Some differences in the marginal
+distribution of the residuals are seen, e.g. for the hour the variance is
+clearly highest in the mornings.
+
+Histograms and box-plots to find patterns. From the histogram and qq-norm plot:
+```{r}
+par(mfrow=c(1,2))
+hist(D$Residuals$h1)
+qqnorm(D$Residuals$h1)
+qqline(D$Residuals$h1)
+```
+We can see, that the residuals are symmetrical with heavy tails.
+
+From boxplots we see the distribution as a function of the time of day
+(i.e. hour in the pairs plot above):
+```{r}
+boxplot(D$Residuals$h1 ~ D$tday$k0)
+```
+They seem to be symmetrical and centered around zero, hence no pattern left in
+the mean - only the variance change.
